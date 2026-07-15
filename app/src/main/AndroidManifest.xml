@@ -6,6 +6,17 @@
         android:label="@string/app_name"
         android:supportsRtl="true">
 
+        <!-- オープンソースライセンス表示（IME設定 兼 ランチャー） -->
+        <activity
+            android:name=".LicensesActivity"
+            android:label="@string/licenses_title"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- 日本語IME本体（InputMethodService） -->
         <service
             android:name=".JapaneseImeService"

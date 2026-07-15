@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">NihongoIME</string>
     <string name="ime_name">日本語IME (開発版)</string>
+    <string name="licenses_title">オープンソースライセンス</string>
 </resources>
