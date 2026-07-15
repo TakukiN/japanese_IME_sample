@@ -64,6 +64,7 @@ class JapaneseImeService : InputMethodService() {
             onEnter = { enter() }
             onDirect = { commitDirect(it) }
             onToggleLast = { toggleLastChar() }
+            onReplaceLast = { prev, next -> replaceLastCommitted(prev, next) }
             onModeChanged = { finishComposingIfAny() }
             onCursorLeft = { sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_LEFT) }
             onCursorRight = { sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_RIGHT) }
@@ -187,6 +188,15 @@ class JapaneseImeService : InputMethodService() {
         toggleIndex = (toggleIndex + 1) % toggleRing.size
         composing.setCharAt(composing.length - 1, toggleRing[toggleIndex])
         updateComposing()
+    }
+
+    /** ↺（英字/数字）直前に確定した文字 [prev] を [next] へ置換する。想定と一致する時のみ実行。 */
+    private fun replaceLastCommitted(prev: String, next: String) {
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(prev.length, 0)?.toString()
+        if (before != prev) return
+        ic.deleteSurroundingText(prev.length, 0)
+        ic.commitText(next, 1)
     }
 
     /** 🌐 次のIMEへ切替。不可ならIMEピッカーを表示する。 */

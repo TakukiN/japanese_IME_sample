@@ -55,8 +55,11 @@ class FlickGuideView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (chars.size < 5) return
-        for (i in 0 until 5) {
+        if (chars.isEmpty()) return
+        // かな=5方向、英字/数字=3〜4方向。存在する候補のマスのみ描画する。
+        val count = minOf(chars.size, slots.size)
+        for (i in 0 until count) {
+            if (chars[i].isEmpty()) continue
             val (col, row) = slots[i]
             val left = col * (cell + gap)
             val top = row * (cell + gap)

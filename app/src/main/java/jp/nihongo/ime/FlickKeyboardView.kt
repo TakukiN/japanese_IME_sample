@@ -30,7 +30,9 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
     var onDakuten: (() -> Unit)? = null
     var onBackspace: (() -> Unit)? = null
     var onEnter: (() -> Unit)? = null
-    var onToggleLast: (() -> Unit)? = null    // ↺ 最後の文字を循環トグル
+    var onToggleLast: (() -> Unit)? = null    // ↺ かなモード: 未確定文字を循環トグル
+    // ↺ 英字/数字モード: 直前に確定した文字 prev を next へ置換
+    var onReplaceLast: ((prev: String, next: String) -> Unit)? = null
     var onCursorLeft: (() -> Unit)? = null
     var onCursorRight: (() -> Unit)? = null
     var onGlobe: (() -> Unit)? = null
@@ -38,6 +40,11 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
 
     private var mode = Mode.KANA
     private var caps = false
+
+    // 直接確定モード（英字/数字）の ↺ 用: 直前キーの候補群・選択位置・確定文字
+    private var lastDirectGroup: List<String> = emptyList()
+    private var lastDirectIndex = 0
+    private var lastDirectChar = ""
 
     /** 文字キー定義。main=大表示, corner=右上小, sub=下部小, chars=フリック候補, direct=直接確定か */
     private data class KeyDef(
@@ -77,8 +84,30 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
             Mode.NUMBER -> Mode.KANA
         }
         caps = false
+        resetDirectToggle()
         build()
     }
+
+    private fun resetDirectToggle() {
+        lastDirectGroup = emptyList()
+        lastDirectIndex = 0
+        lastDirectChar = ""
+    }
+
+    /** ↺ キー。かなは未確定トグル、英字/数字は直前確定文字を候補で循環。 */
+    private fun revolveLast() {
+        if (mode == Mode.KANA) {
+            onToggleLast?.invoke()
+            return
+        }
+        if (lastDirectGroup.size <= 1) return
+        val prev = lastDirectChar
+        lastDirectIndex = (lastDirectIndex + 1) % lastDirectGroup.size
+        lastDirectChar = applyCaps(lastDirectGroup[lastDirectIndex])
+        onReplaceLast?.invoke(prev, lastDirectChar)
+    }
+
+    private fun applyCaps(s: String): String = if (caps) s.uppercase() else s
 
     private fun build() {
         removeAllViews()
@@ -95,7 +124,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         fun k(main: String, num: String, c: List<String>) =
             charKey(KeyDef(main, corner = num, chars = c, direct = false))
         addRow(
-            funcKey("↺", false, false) { onToggleLast?.invoke() },
+            funcKey("↺", false, false) { revolveLast() },
             k("あ", "1", listOf("あ", "い", "う", "え", "お")),
             k("か", "2", listOf("か", "き", "く", "け", "こ")),
             k("さ", "3", listOf("さ", "し", "す", "せ", "そ")),
@@ -128,7 +157,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         fun a(main: String, num: String, c: List<String>) =
             charKey(KeyDef(main, corner = num, chars = c, direct = true))
         addRow(
-            funcKey("↺", false, false) { onToggleLast?.invoke() },
+            funcKey("↺", false, false) { revolveLast() },
             a("@/:~", "1", listOf("@", "/", ":", "~")),
             a("ABC", "2", listOf("a", "b", "c")),
             a("DEF", "3", listOf("d", "e", "f")),
@@ -161,7 +190,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         fun n(main: String, sub: String, c: List<String>) =
             charKey(KeyDef(main, sub = sub, chars = c, direct = true))
         addRow(
-            funcKey("↺", false, false) { onToggleLast?.invoke() },
+            funcKey("↺", false, false) { revolveLast() },
             n("1", "/:@~", listOf("1", "/", ":", "@", "~")),
             n("2", "\"\\%'", listOf("2", "\"", "\\", "%", "'")),
             n("3", "+×÷-", listOf("3", "+", "×", "÷", "-")),
@@ -269,8 +298,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
                     v.background = Theme.keyBackground(Theme.KEY, ctx = context)
                     hideGuide()
                     val idx = flickIndex(ev.x - startX, ev.y - startY, def.chars.size)
-                    val ch = def.chars[idx]
-                    if (ch.isNotEmpty()) emit(ch, def.direct)
+                    if (def.chars[idx].isNotEmpty()) emit(def, idx)
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -282,9 +310,15 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun emit(ch: String, direct: Boolean) {
-        if (direct) {
-            onDirect?.invoke(if (caps) ch.uppercase() else ch)
+    private fun emit(def: KeyDef, index: Int) {
+        val ch = def.chars[index]
+        if (def.direct) {
+            val out = applyCaps(ch)
+            // ↺ 用に直前キーの候補群と選択位置を記録
+            lastDirectGroup = def.chars
+            lastDirectIndex = index
+            lastDirectChar = out
+            onDirect?.invoke(out)
         } else {
             onKana?.invoke(ch)
         }
@@ -305,7 +339,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         val tv = TextView(context).apply {
             text = label
             gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 13f else 20f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 15f else 21f)
             setTextColor(if (accent) Theme.ON_ACCENT else Theme.TEXT_SUB)
             typeface = Theme.fontMedium
         }
