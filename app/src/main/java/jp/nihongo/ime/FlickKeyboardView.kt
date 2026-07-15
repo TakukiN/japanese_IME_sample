@@ -131,11 +131,11 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
             repeatKey("⌫") { onBackspace?.invoke() }
         )
         addRow(
-            funcKey("‹", false, false) { onCursorLeft?.invoke() },
+            funcKey("‹", false, false, sizeSp = 30f) { onCursorLeft?.invoke() },
             k("た", "4", listOf("た", "ち", "つ", "て", "と")),
             k("な", "5", listOf("な", "に", "ぬ", "ね", "の")),
             k("は", "6", listOf("は", "ひ", "ふ", "へ", "ほ")),
-            funcKey("›", false, false) { onCursorRight?.invoke() }
+            funcKey("›", false, false, sizeSp = 30f) { onCursorRight?.invoke() }
         )
         addRow(
             funcKey("あa1", false, true) { cycleMode() },
@@ -164,11 +164,11 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
             repeatKey("⌫") { onBackspace?.invoke() }
         )
         addRow(
-            funcKey("‹", false, false) { onCursorLeft?.invoke() },
+            funcKey("‹", false, false, sizeSp = 30f) { onCursorLeft?.invoke() },
             a("GHI", "4", listOf("g", "h", "i")),
             a("JKL", "5", listOf("j", "k", "l")),
             a("MNO", "6", listOf("m", "n", "o")),
-            funcKey("›", false, false) { onCursorRight?.invoke() }
+            funcKey("›", false, false, sizeSp = 30f) { onCursorRight?.invoke() }
         )
         addRow(
             funcKey("あa1", false, true) { cycleMode() },
@@ -197,11 +197,11 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
             repeatKey("⌫") { onBackspace?.invoke() }
         )
         addRow(
-            funcKey("‹", false, false) { onCursorLeft?.invoke() },
+            funcKey("‹", false, false, sizeSp = 30f) { onCursorLeft?.invoke() },
             n("4", "*;&·", listOf("4", "*", ";", "&", "·")),
             n("5", "¥₩€$", listOf("5", "¥", "₩", "€", "$")),
             n("6", "<^>=", listOf("6", "<", "^", ">", "=")),
-            funcKey("›", false, false) { onCursorRight?.invoke() }
+            funcKey("›", false, false, sizeSp = 30f) { onCursorRight?.invoke() }
         )
         addRow(
             funcKey("あa1", false, true) { cycleMode() },
@@ -335,11 +335,19 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         return if (idx < size) idx else 0
     }
 
-    private fun funcKey(label: String, accent: Boolean, small: Boolean, action: () -> Unit): View {
+    private fun funcKey(
+        label: String,
+        accent: Boolean,
+        small: Boolean,
+        sizeSp: Float? = null,
+        action: () -> Unit,
+    ): View {
         val tv = TextView(context).apply {
             text = label
             gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 15f else 21f)
+            // 記号グリフ（↺ ‹ › 等）を上下中央へ正しく収めるため既定の行間余白を無効化
+            includeFontPadding = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp ?: if (small) 15f else 21f)
             setTextColor(if (accent) Theme.ON_ACCENT else Theme.TEXT_SUB)
             typeface = Theme.fontMedium
         }
@@ -355,6 +363,7 @@ class FlickKeyboardView(context: Context) : LinearLayout(context) {
         val tv = TextView(context).apply {
             text = label
             gravity = Gravity.CENTER
+            includeFontPadding = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
             setTextColor(Theme.TEXT_SUB)
             typeface = Theme.fontMedium
