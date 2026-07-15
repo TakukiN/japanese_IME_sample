@@ -17,7 +17,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // MASVS リバース耐性: 難読化・不要コード削除・ログ除去
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

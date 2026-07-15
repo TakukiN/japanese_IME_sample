@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  クラウドバックアップ・端末間転送のいずれからも全アプリデータを除外する。
+  IMEの学習データ・辞書・設定に機密が含まれ得るため、外部へ複製させない。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>
