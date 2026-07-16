@@ -10,6 +10,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.text.InputType
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
+import android.text.style.UnderlineSpan
 import android.util.Log
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -18,6 +22,8 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.LinearLayout
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Preedit
 
 /**
  * 日本語IME本体。
@@ -46,6 +52,11 @@ class JapaneseImeService : InputMethodService() {
     private var candidates: List<String> = emptyList()
     private var selectedIndex = -1
 
+    // 連文節変換（対話セッション）
+    private val session by lazy { MozcSession(mozc) }
+    private var converting = false
+    private var candidateIds: List<Int> = emptyList()
+
     private var outputMethod = OutputMethod.COMMIT_TEXT
     private val keyCharacterMap by lazy { KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD) }
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -71,7 +82,7 @@ class JapaneseImeService : InputMethodService() {
 
     override fun onCreateInputView(): View {
         candidateView = CandidateView(this).apply {
-            onPick = { commitCandidate(it) }
+            onPick = { onCandidatePicked(it) }
             onGear = { openSettings() }
         }
         val keyboard = FlickKeyboardView(this).apply {
@@ -84,8 +95,10 @@ class JapaneseImeService : InputMethodService() {
             onToggleLast = { toggleLastChar() }
             onReplaceLast = { prev, next -> replaceLastCommitted(prev, next) }
             onModeChanged = { finishComposingIfAny() }
-            onCursorLeft = { sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_LEFT) }
-            onCursorRight = { sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_RIGHT) }
+            onCursorLeft = { cursorLeft() }
+            onCursorRight = { cursorRight() }
+            onCursorLeftLong = { if (converting) renderConversion(session.shrink()) }
+            onCursorRightLong = { if (converting) renderConversion(session.expand()) }
             onGlobe = { switchIme() }
         }
         return LinearLayout(this).apply {
@@ -137,8 +150,10 @@ class JapaneseImeService : InputMethodService() {
             commitViaInputConnection(kana)
             return
         }
-        if (selectedIndex >= 0) {
-            // 変換候補プレビュー中の新規入力 → 選択候補を確定してから継続
+        if (converting) {
+            // 変換中の新規入力 → 現在の変換を確定してから継続
+            commitConversion()
+        } else if (selectedIndex >= 0) {
             finishComposingIfAny()
         }
         composing.append(kana)
@@ -159,8 +174,99 @@ class JapaneseImeService : InputMethodService() {
         }
     }
 
-    /** 「空白変換」: 未確定が無ければ空白入力。あれば押下ごとに候補を順に選択移動。 */
+    /**
+     * 「空白変換」: 未確定が無ければ空白。あれば連文節変換を開始/継続する。
+     * 変換中の再押下は注目文節の次候補へ。
+     */
     private fun convertOrSpace() {
+        if (composing.isEmpty() && !converting) {
+            outputText(FULL_WIDTH_SPACE)
+            return
+        }
+        if (!mozc.initialized) {
+            legacyConvertOrSpace()
+            return
+        }
+        if (!converting) startConversion() else renderConversion(session.space())
+    }
+
+    /** 読みを Mozc セッションへ送って連文節変換を開始する。 */
+    private fun startConversion() {
+        if (composing.isEmpty()) return
+        try {
+            session.ensure()
+            session.revert()
+            composing.forEach { session.insertKana(it.toString()) }
+            converting = true
+            renderConversion(session.space())
+        } catch (t: Throwable) {
+            Log.e(TAG, "startConversion failed", t)
+            converting = false
+            legacyConvertOrSpace()
+        }
+    }
+
+    /** 変換結果（文節列＋注目文節の候補）を表示する。 */
+    private fun renderConversion(out: Output) {
+        val segs = out.preedit.segmentList
+        if (segs.isEmpty()) return
+        val focusIdx = segs.indexOfFirst {
+            it.annotation == Preedit.Segment.Annotation.HIGHLIGHT
+        }.coerceAtLeast(0)
+        if (previewInTarget) {
+            val sb = SpannableStringBuilder()
+            var focusStart = 0
+            var focusEnd = 0
+            segs.forEachIndexed { i, seg ->
+                val start = sb.length
+                sb.append(seg.value)
+                if (i == focusIdx) {
+                    focusStart = start
+                    focusEnd = sb.length
+                }
+            }
+            sb.setSpan(UnderlineSpan(), 0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (focusEnd > focusStart) {
+                sb.setSpan(
+                    BackgroundColorSpan(Theme.ACCENT),
+                    focusStart, focusEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
+            currentInputConnection?.setComposingText(sb, 1)
+        }
+        val words = out.allCandidateWords.candidatesList
+        candidates = words.map { it.value }
+        candidateIds = words.map { it.id }
+        selectedIndex = candidates.indexOf(segs.getOrNull(focusIdx)?.value)
+        candidateView.setCandidates(candidates, selectedIndex)
+    }
+
+    /** 候補タップ: 変換中は注目文節へ候補を適用、通常は提案を確定。 */
+    private fun onCandidatePicked(index: Int) {
+        if (converting) {
+            val id = candidateIds.getOrNull(index) ?: return
+            renderConversion(session.selectCandidate(id))
+        } else {
+            val text = candidates.getOrNull(index) ?: return
+            outputText(text)
+            resetComposing()
+        }
+    }
+
+    /** 変換を確定する（Enter）。 */
+    private fun commitConversion() {
+        val out = session.commit()
+        converting = false
+        if (previewInTarget) {
+            currentInputConnection?.finishComposingText()
+        } else if (out.hasResult()) {
+            outputText(out.result.value)
+        }
+        resetComposing()
+    }
+
+    /** Mozc 未初期化時のフォールバック（従来の一括候補循環）。 */
+    private fun legacyConvertOrSpace() {
         if (composing.isEmpty()) {
             outputText(FULL_WIDTH_SPACE)
             return
@@ -174,9 +280,14 @@ class JapaneseImeService : InputMethodService() {
         candidateView.setCandidates(candidates, selectedIndex)
     }
 
-    private fun commitCandidate(text: String) {
-        outputText(text)
-        resetComposing()
+    private fun cursorLeft() {
+        if (converting) renderConversion(session.focusLeft())
+        else sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_LEFT)
+    }
+
+    private fun cursorRight() {
+        if (converting) renderConversion(session.focusRight())
+        else sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_RIGHT)
     }
 
     private fun toggleDakuten() {
@@ -187,6 +298,13 @@ class JapaneseImeService : InputMethodService() {
     }
 
     private fun backspace() {
+        if (converting) {
+            // 変換を取り消して読みへ戻す
+            session.revert()
+            converting = false
+            updateComposing()
+            return
+        }
         if (composing.isNotEmpty()) {
             composing.deleteCharAt(composing.length - 1)
             updateComposing()
@@ -201,6 +319,7 @@ class JapaneseImeService : InputMethodService() {
 
     private fun enter() {
         when {
+            converting -> commitConversion()
             composing.isNotEmpty() -> {
                 finishComposingIfAny()
                 flushPendingOutput()
@@ -217,6 +336,10 @@ class JapaneseImeService : InputMethodService() {
 
     /** 未確定があれば、選択候補（無ければ読み）を確定してクリアする。 */
     private fun finishComposingIfAny() {
+        if (converting) {
+            commitConversion()
+            return
+        }
         if (composing.isEmpty()) return
         val finalText = if (selectedIndex >= 0 && candidates.isNotEmpty()) {
             candidates[selectedIndex]
@@ -337,7 +460,9 @@ class JapaneseImeService : InputMethodService() {
         toggleRing = emptyList()
         toggleIndex = 0
         candidates = emptyList()
+        candidateIds = emptyList()
         selectedIndex = -1
+        converting = false
         if (::candidateView.isInitialized) candidateView.clear()
     }
 

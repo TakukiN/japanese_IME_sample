@@ -38,7 +38,7 @@ class CandidateView(context: Context) : LinearLayout(context) {
     }
     private val chips = mutableListOf<TextView>()
 
-    var onPick: ((String) -> Unit)? = null
+    var onPick: ((index: Int) -> Unit)? = null
     var onGear: (() -> Unit)? = null
 
     init {
@@ -56,7 +56,7 @@ class CandidateView(context: Context) : LinearLayout(context) {
         chips.clear()
         candidates.forEachIndexed { index, candidate ->
             val primary = index == selectedIndex || (selectedIndex < 0 && index == 0)
-            val chip = makeChip(candidate, primary)
+            val chip = makeChip(candidate, primary, index)
             chips += chip
             row.addView(chip)
         }
@@ -80,7 +80,7 @@ class CandidateView(context: Context) : LinearLayout(context) {
         post { scroller.smoothScrollTo(target.left, 0) }
     }
 
-    private fun makeChip(text: String, primary: Boolean): TextView = TextView(context).apply {
+    private fun makeChip(text: String, primary: Boolean, index: Int): TextView = TextView(context).apply {
         this.text = text
         gravity = Gravity.CENTER
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
@@ -96,7 +96,7 @@ class CandidateView(context: Context) : LinearLayout(context) {
         } else {
             Theme.chipBackground(Theme.CAND_CHIP, Theme.KEY_BORDER, context)
         }
-        setOnClickListener { onPick?.invoke(text) }
+        setOnClickListener { onPick?.invoke(index) }
     }
 
     private fun dpX(v: Int): Int = (v * resources.displayMetrics.density).toInt()
