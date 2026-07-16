@@ -1,8 +1,17 @@
 package jp.nihongo.ime
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Intent
 import android.inputmethodservice.InputMethodService
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PersistableBundle
 import android.text.InputType
 import android.util.Log
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -13,14 +22,14 @@ import android.widget.LinearLayout
 /**
  * 日本語IME本体。
  *
- * フリックキーボードで読み（ひらがな）を未確定文字列（composing）として蓄積し、
- * 変換候補を提示、候補選択で確定する。かな漢字変換は [Converter] に委譲する。
+ * フリックキーボードで読み（ひらがな）を蓄積し、候補を提示、確定する。変換は [Converter] に委譲。
+ * 確定テキストの対象アプリへの出力手段は設定（[OutputMethod]）で切り替える:
+ * commitText / KeyEvent / クリップボード / AccessibilityService。
  *
  * セキュリティ（OWASP MASVS）:
- * - パスワード等の機密入力欄（[isSecureField]）では変換・候補提示・エンジン送信を行わず、
- *   打鍵をそのまま直接確定する（学習・ログ・外部エンジンへ機密文字を渡さない）。
- * - INTERNET 権限を持たず、入力内容の外部送信は一切行わない（完全オンデバイス）。
- * - 打鍵内容をログ出力しない。
+ * - 機密入力欄（[isSecureField]）では出力手段に関わらず commitText を使い、変換・候補・
+ *   エンジン送信・クリップボード/アクセシビリティ経由の出力を行わない。
+ * - INTERNET 権限を持たず、入力内容の外部送信は行わない。打鍵をログ出力しない。
  */
 class JapaneseImeService : InputMethodService() {
 
@@ -29,23 +38,31 @@ class JapaneseImeService : InputMethodService() {
     private lateinit var candidateView: CandidateView
 
     private val composing = StringBuilder()
-
-    /** 機密入力欄（パスワード等）か。true の間は変換・候補・エンジン送信を無効化する。 */
     private var secureField = false
 
-    // ↺ 文字トグルの状態（最後に入力したキーの循環リングと現在位置）
     private var toggleRing: List<Char> = emptyList()
     private var toggleIndex = 0
 
-    // 変換候補の選択状態（「空白変換」押下で順送り）。selectedIndex<0 は未選択（読み表示中）。
     private var candidates: List<String> = emptyList()
     private var selectedIndex = -1
 
+    private var outputMethod = OutputMethod.COMMIT_TEXT
+    private val keyCharacterMap by lazy { KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD) }
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    // クリップボード方式の一括出力バッファ（貼付=Toastの回数を減らす）
+    private val pendingOutput = StringBuilder()
+    private val flushRunnable = Runnable { flushPendingOutput() }
+
+    /** 対象欄に未確定（下線）プレビューを出すのは commitText 手段の時だけ。 */
+    private val previewInTarget: Boolean
+        get() = outputMethod == OutputMethod.COMMIT_TEXT
+
     override fun onCreate() {
         super.onCreate()
-        // 変換: Mozc（未初期化時は軽量辞書へフォールバック）
         mozc = MozcEngine(this)
         converter = MozcConverter(mozc, SimpleDictionaryConverter(this))
+        outputMethod = OutputMethod.load(this)
         Thread {
             val initialized = mozc.initialize()
             Log.i(TAG, "Mozc initialized=$initialized version=${mozc.dataVersion()}")
@@ -55,6 +72,7 @@ class JapaneseImeService : InputMethodService() {
     override fun onCreateInputView(): View {
         candidateView = CandidateView(this).apply {
             onPick = { commitCandidate(it) }
+            onGear = { openSettings() }
         }
         val keyboard = FlickKeyboardView(this).apply {
             onKana = { appendKana(it) }
@@ -82,24 +100,46 @@ class JapaneseImeService : InputMethodService() {
         }
     }
 
+    private fun openSettings() {
+        runCatching {
+            requestHideSelf(0)
+            startActivity(
+                Intent(this, SettingsActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                ),
+            )
+        }.onFailure { Log.w(TAG, "openSettings failed", it) }
+    }
+
     override fun onStartInput(info: EditorInfo?, restarting: Boolean) {
         super.onStartInput(info, restarting)
+        // 設定変更を反映
+        outputMethod = OutputMethod.load(this)
         secureField = isSecureField(info)
+        // 前の入力欄の未貼付バッファは破棄（他欄への混入防止）
+        mainHandler.removeCallbacks(flushRunnable)
+        pendingOutput.setLength(0)
         resetComposing()
+    }
+
+    override fun onFinishInput() {
+        // 入力欄を離れる前に未貼付分を確定
+        flushPendingOutput()
+        super.onFinishInput()
     }
 
     // ---- 入力ハンドラ ----
 
     private fun appendKana(kana: String) {
         if (secureField) {
-            // 機密欄: 変換・候補・エンジン送信を行わず直接確定する
-            commitText(kana)
+            commitViaInputConnection(kana)
             return
         }
         if (selectedIndex >= 0) {
-            // 変換候補プレビュー中の新規入力 → 選択候補を確定してから新しい入力を開始
-            currentInputConnection?.finishComposingText()
-            resetComposing()
+            // 変換候補プレビュー中の新規入力 → 選択候補を確定してから継続
+            finishComposingIfAny()
         }
         composing.append(kana)
         updateComposing()
@@ -108,8 +148,7 @@ class JapaneseImeService : InputMethodService() {
     }
 
     private fun updateComposing() {
-        currentInputConnection?.setComposingText(composing, 1)
-        // 読みが変わったので候補の選択状態はリセットする
+        if (previewInTarget) currentInputConnection?.setComposingText(composing, 1)
         selectedIndex = -1
         if (composing.isNotEmpty()) {
             candidates = converter.convert(composing.toString())
@@ -120,13 +159,10 @@ class JapaneseImeService : InputMethodService() {
         }
     }
 
-    /**
-     * 「空白変換」押下。未確定が無ければ全角スペースを入力。
-     * 未確定があれば、押下ごとに候補を順に選択移動し、未確定表示を選択候補に更新する。
-     */
+    /** 「空白変換」: 未確定が無ければ空白入力。あれば押下ごとに候補を順に選択移動。 */
     private fun convertOrSpace() {
         if (composing.isEmpty()) {
-            commitText(FULL_WIDTH_SPACE)
+            outputText(FULL_WIDTH_SPACE)
             return
         }
         if (candidates.isEmpty()) {
@@ -134,12 +170,12 @@ class JapaneseImeService : InputMethodService() {
             if (candidates.isEmpty()) return
         }
         selectedIndex = if (selectedIndex < 0) 0 else (selectedIndex + 1) % candidates.size
-        currentInputConnection?.setComposingText(candidates[selectedIndex], 1)
+        if (previewInTarget) currentInputConnection?.setComposingText(candidates[selectedIndex], 1)
         candidateView.setCandidates(candidates, selectedIndex)
     }
 
     private fun commitCandidate(text: String) {
-        commitText(text)
+        outputText(text)
         resetComposing()
     }
 
@@ -154,34 +190,44 @@ class JapaneseImeService : InputMethodService() {
         if (composing.isNotEmpty()) {
             composing.deleteCharAt(composing.length - 1)
             updateComposing()
+        } else if (pendingOutput.isNotEmpty()) {
+            // 未貼付バッファを1文字戻す（貼付=Toastを発生させない）
+            pendingOutput.deleteCharAt(pendingOutput.length - 1)
+            scheduleClipboardFlush()
         } else {
             currentInputConnection?.deleteSurroundingText(1, 0)
         }
     }
 
     private fun enter() {
-        if (composing.isNotEmpty()) {
-            currentInputConnection?.finishComposingText()
-            resetComposing()
-        } else {
-            sendDefaultEditorAction(true)
+        when {
+            composing.isNotEmpty() -> {
+                finishComposingIfAny()
+                flushPendingOutput()
+            }
+            pendingOutput.isNotEmpty() -> flushPendingOutput()
+            else -> sendDefaultEditorAction(true)
         }
     }
 
-    /** 英字・数字・記号を直接確定する（未確定があれば先に確定）。 */
     private fun commitDirect(text: String) {
         finishComposingIfAny()
-        commitText(text)
+        outputText(text)
     }
 
-    /** モード切替時などに、未確定をそのまま確定してクリアする。 */
+    /** 未確定があれば、選択候補（無ければ読み）を確定してクリアする。 */
     private fun finishComposingIfAny() {
         if (composing.isEmpty()) return
-        currentInputConnection?.finishComposingText()
+        val finalText = if (selectedIndex >= 0 && candidates.isNotEmpty()) {
+            candidates[selectedIndex]
+        } else {
+            composing.toString()
+        }
+        outputText(finalText)
         resetComposing()
     }
 
-    /** ↺ 最後の入力文字を、そのキーの循環リング `[文字→番号→小文字]` で次へ送る。 */
+    /** ↺（かな）未確定の最後の文字を循環トグルする。 */
     private fun toggleLastChar() {
         if (composing.isEmpty() || toggleRing.size <= 1) return
         if (composing.last() != toggleRing[toggleIndex]) return
@@ -190,30 +236,101 @@ class JapaneseImeService : InputMethodService() {
         updateComposing()
     }
 
-    /** ↺（英字/数字）直前に確定した文字 [prev] を [next] へ置換する。想定と一致する時のみ実行。 */
+    /** ↺（英字/数字）直前に確定した文字 [prev] を [next] へ置換する。 */
     private fun replaceLastCommitted(prev: String, next: String) {
         val ic = currentInputConnection ?: return
-        val before = ic.getTextBeforeCursor(prev.length, 0)?.toString()
-        if (before != prev) return
+        if (ic.getTextBeforeCursor(prev.length, 0)?.toString() != prev) return
         ic.deleteSurroundingText(prev.length, 0)
-        ic.commitText(next, 1)
+        outputText(next)
     }
 
-    /** 🌐 次のIMEへ切替。不可ならIMEピッカーを表示する。 */
     private fun switchIme() {
         runCatching {
             if (!switchToNextInputMethod(false)) {
-                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-                imm.showInputMethodPicker()
+                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
             }
         }.onFailure { Log.w(TAG, "switchIme failed", it) }
     }
 
-    // ---- ヘルパー ----
+    // ---- 出力手段のルーティング ----
 
-    private fun commitText(text: CharSequence) {
+    /** 確定テキストを、設定された手段で対象アプリへ出力する。機密欄は常に commitText。 */
+    private fun outputText(text: String) {
+        if (secureField) {
+            commitViaInputConnection(text)
+            return
+        }
+        when (outputMethod) {
+            OutputMethod.COMMIT_TEXT -> commitViaInputConnection(text)
+            OutputMethod.KEY_EVENT -> outputViaKeyEvent(text)
+            OutputMethod.CLIPBOARD -> enqueueForClipboard(text)
+            OutputMethod.ACCESSIBILITY -> outputViaAccessibility(text)
+        }
+    }
+
+    private fun commitViaInputConnection(text: CharSequence) {
         currentInputConnection?.commitText(text, 1)
     }
+
+    private fun outputViaKeyEvent(text: String) {
+        val ic = currentInputConnection ?: return
+        val events = keyCharacterMap.getEvents(text.toCharArray())
+        if (events != null) {
+            for (event in events) ic.sendKeyEvent(event)
+        } else {
+            // 日本語等は KeyEvent 化不可 → commitText フォールバック
+            ic.commitText(text, 1)
+        }
+    }
+
+    /** クリップボード方式: 文字をバッファに溜め、間隔/一定量でまとめて貼り付ける（Toast削減）。 */
+    private fun enqueueForClipboard(text: String) {
+        pendingOutput.append(text)
+        scheduleClipboardFlush()
+    }
+
+    private fun scheduleClipboardFlush() {
+        mainHandler.removeCallbacks(flushRunnable)
+        when {
+            pendingOutput.length >= BATCH_MAX -> flushPendingOutput()
+            pendingOutput.isNotEmpty() -> mainHandler.postDelayed(flushRunnable, FLUSH_DELAY_MS)
+        }
+    }
+
+    /** 溜まった文字を1回だけ貼り付ける。 */
+    private fun flushPendingOutput() {
+        mainHandler.removeCallbacks(flushRunnable)
+        if (pendingOutput.isEmpty()) return
+        val text = pendingOutput.toString()
+        pendingOutput.setLength(0)
+        pasteViaClipboard(text)
+    }
+
+    private fun pasteViaClipboard(text: String) {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        val saved = clipboard.primaryClip
+        val clip = ClipData.newPlainText("nihongo-ime", text)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // 中身をクリップボードプレビューに露出させない
+            clip.description.extras = PersistableBundle().apply {
+                putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+            }
+        }
+        clipboard.setPrimaryClip(clip)
+        val pasted = currentInputConnection?.performContextMenuAction(android.R.id.paste) == true
+        if (!pasted) sendDownUpKeyEvents(KeyEvent.KEYCODE_PASTE)
+        // 元のクリップボード内容を復元（漏洩・上書き防止）
+        saved?.let { old ->
+            mainHandler.postDelayed({ runCatching { clipboard.setPrimaryClip(old) } }, 600)
+        }
+    }
+
+    private fun outputViaAccessibility(text: String) {
+        val handled = ImeAccessibilityService.instance?.appendText(text) == true
+        if (!handled) commitViaInputConnection(text) // 未有効/失敗時フォールバック
+    }
+
+    // ---- ヘルパー ----
 
     private fun resetComposing() {
         composing.setLength(0)
@@ -229,18 +346,15 @@ class JapaneseImeService : InputMethodService() {
         LinearLayout.LayoutParams.WRAP_CONTENT,
     )
 
-    /** パスワード等の機密入力欄、または個人化学習を拒否する欄かを判定する。 */
     private fun isSecureField(info: EditorInfo?): Boolean {
         if (info == null) return false
         val variation = info.inputType and InputType.TYPE_MASK_VARIATION
         val inputClass = info.inputType and InputType.TYPE_MASK_CLASS
-        // テキスト系の秘匿入力欄（通常/可視/Web）
         val textPwField = inputClass == InputType.TYPE_CLASS_TEXT && (
             variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
                 variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
                 variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
             )
-        // 数値系の秘匿入力欄（PIN等）
         val numberPwField = inputClass == InputType.TYPE_CLASS_NUMBER &&
             variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
         val noPersonalizedLearning =
@@ -251,5 +365,9 @@ class JapaneseImeService : InputMethodService() {
     private companion object {
         const val TAG = "JapaneseImeService"
         const val FULL_WIDTH_SPACE = "　"
+
+        // クリップボード一括出力: この文字数に達するか、最後の入力から遅延後にまとめて貼付
+        const val BATCH_MAX = 24
+        const val FLUSH_DELAY_MS = 700L
     }
 }

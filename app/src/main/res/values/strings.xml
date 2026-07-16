@@ -3,4 +3,7 @@
     <string name="app_name">NihongoIME</string>
     <string name="ime_name">日本語IME (開発版)</string>
     <string name="licenses_title">オープンソースライセンス</string>
+    <string name="settings_title">日本語IME 設定</string>
+    <string name="accessibility_label">日本語IME 入力補助</string>
+    <string name="accessibility_desc">選択した出力手段が「AccessibilityService」の時、フォーカス中の入力欄へ文字を設定します。</string>
 </resources>

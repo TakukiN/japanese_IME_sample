@@ -3,45 +3,54 @@ package jp.nihongo.ime
 import android.content.Context
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.ViewGroup
+import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * 変換候補を横スクロールで表示するビュー（業務用ダークテーマ）。
- * 選択中の候補（`selectedIndex`）をアクセント色で強調し、可視位置へスクロールする。
- * 候補タップで [onPick] を通知する。
+ * 変換候補バー（業務用ダークテーマ）。
+ * 右端に設定用ギアアイコンを持ち、**候補が表示されている間は非表示**にする
+ * （候補が無いアイドル時のみギアを見せる）。候補タップで [onPick]、ギアで [onGear] を通知。
  */
-class CandidateView(context: Context) : HorizontalScrollView(context) {
+class CandidateView(context: Context) : LinearLayout(context) {
 
     private val row = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dpX(6), 0, dpX(6), 0)
     }
-    private val chips = mutableListOf<TextView>()
-
-    var onPick: ((String) -> Unit)? = null
-
-    init {
+    private val scroller = HorizontalScrollView(context).apply {
         isFillViewport = true
-        setBackgroundColor(Theme.CAND_BG)
         isHorizontalScrollBarEnabled = false
         addView(
             row,
-            ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ),
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
+    }
+    private val gear = TextView(context).apply {
+        text = "⚙"
+        gravity = Gravity.CENTER
+        includeFontPadding = false
+        setTextColor(Theme.TEXT_SUB)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        setPadding(dpX(14), 0, dpX(14), 0)
+    }
+    private val chips = mutableListOf<TextView>()
+
+    var onPick: ((String) -> Unit)? = null
+    var onGear: (() -> Unit)? = null
+
+    init {
+        orientation = HORIZONTAL
+        setBackgroundColor(Theme.CAND_BG)
         minimumHeight = dpX(48)
+        addView(scroller, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        addView(gear, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+        gear.setOnClickListener { onGear?.invoke() }
     }
 
-    /**
-     * 候補を表示する。
-     * @param selectedIndex 強調する候補の位置。負値なら先頭を控えめに強調（未選択状態）。
-     */
+    /** 候補を表示する。候補があればギアを隠す。 */
     fun setCandidates(candidates: List<String>, selectedIndex: Int = -1) {
         row.removeAllViews()
         chips.clear()
@@ -51,21 +60,24 @@ class CandidateView(context: Context) : HorizontalScrollView(context) {
             chips += chip
             row.addView(chip)
         }
+        gear.visibility = if (candidates.isEmpty()) View.VISIBLE else View.GONE
         scrollToSelected(selectedIndex)
     }
 
+    /** 候補をクリアし、ギアを再表示する。 */
     fun clear() {
         row.removeAllViews()
         chips.clear()
+        gear.visibility = View.VISIBLE
     }
 
     private fun scrollToSelected(selectedIndex: Int) {
         if (selectedIndex <= 0 || selectedIndex >= chips.size) {
-            scrollX = 0
+            scroller.scrollX = 0
             return
         }
         val target = chips[selectedIndex]
-        post { smoothScrollTo(target.left, 0) }
+        post { scroller.smoothScrollTo(target.left, 0) }
     }
 
     private fun makeChip(text: String, primary: Boolean): TextView = TextView(context).apply {

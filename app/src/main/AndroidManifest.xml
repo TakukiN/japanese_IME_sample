@@ -14,16 +14,36 @@
         android:label="@string/app_name"
         android:supportsRtl="true">
 
-        <!-- オープンソースライセンス表示（IME設定 兼 ランチャー） -->
+        <!-- 設定画面（IME設定 兼 ランチャー） -->
         <activity
-            android:name=".LicensesActivity"
-            android:label="@string/licenses_title"
+            android:name=".SettingsActivity"
+            android:label="@string/settings_title"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- オープンソースライセンス表示 -->
+        <activity
+            android:name=".LicensesActivity"
+            android:label="@string/licenses_title"
+            android:exported="false" />
+
+        <!-- 補助アクセシビリティサービス（OutputMethod.ACCESSIBILITY 選択時のみ使用） -->
+        <service
+            android:name=".ImeAccessibilityService"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
 
         <!-- 日本語IME本体（InputMethodService） -->
         <service
